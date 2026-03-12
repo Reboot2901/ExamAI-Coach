@@ -1,7 +1,7 @@
 import streamlit as st
 import json
 import requests
-from llm_helper import ask_llm
+from llm_helper import MODEL_NAME, OLLAMA_API_URL, ask_llm
 from prompts import chat_prompt
 from database import save_chat_message
 from search_helper import should_use_live_search
@@ -106,9 +106,27 @@ def ai_tutor_chat(user):
                         """
                     sources_placeholder.markdown(sources_html, unsafe_allow_html=True)
             else:
-                # Standard LLM logic using Gemini backward compatibility
+                # Streaming LLM logic for Ollama
                 try:
-                    full_response = ask_llm(ai_prompt)
+                    payload = {
+                        "model": MODEL_NAME,
+                        "prompt": ai_prompt,
+                        "stream": True # Enable streaming
+                    }
+                    
+                    with requests.post(OLLAMA_API_URL, json=payload, stream=True, timeout=60) as r:
+                        r.raise_for_status()
+                        for line in r.iter_lines():
+                            if line:
+                                chunk = json.loads(line)
+                                word = chunk.get("response", "")
+                                if word:
+                                    full_response = "{}{}".format(full_response, word)
+                                response_placeholder.markdown("{}▌".format(full_response))
+                                
+                                if chunk.get("done"):
+                                    break
+                                    
                     response_placeholder.markdown(full_response)
                 except Exception as e:
                     full_response = f"❌ Error connecting to AI: {str(e)}"
