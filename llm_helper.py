@@ -1,78 +1,57 @@
+"""
+llm_helper.py — Single source of truth for all Gemini API calls.
+
+Usage:
+    from llm_helper import ask_llm
+    answer, sources = ask_llm("Explain Newton's second law")
+"""
 import os
-import requests
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# =========================
-# Configuration
-# =========================
-
-# Choose provider: "ollama" or "gemini"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")
-
-# Ollama settings
-MODEL_NAME = "llama3"
-OLLAMA_API_URL = "http://localhost:11434/api/generate"
-
-# Gemini settings
-GEMINI_MODEL = "gemini-1.5-flash"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+MODEL_NAME = "gemini-2.5-flash"
 
 
-# =========================
-# Ollama function
-# =========================
+def _get_model() -> genai.GenerativeModel:
+    """Configure Gemini and return the model instance."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise EnvironmentError("GEMINI_API_KEY is not set. Add it to your .env file.")
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(MODEL_NAME)
 
-def ask_ollama(prompt: str) -> str:
+
+def ask_llm(prompt: str) -> tuple[str, list]:
+    """
+    Send a prompt to Gemini and return (answer: str, sources: list).
+
+    Always returns a 2-tuple so callers can safely unpack:
+        answer, sources = ask_llm(prompt)
+
+    Sources list is always empty for non-grounded calls.
+    """
+    if not prompt or not prompt.strip():
+        return "Please provide a valid input.", []
+
     try:
-        response = requests.post(
-            OLLAMA_API_URL,
-            json={
-                "model": MODEL_NAME,
-                "prompt": prompt,
-                "stream": False
-            },
-            timeout=60
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data.get("response", "No response from Ollama.")
-    except requests.exceptions.RequestException as e:
-        return f"Error connecting to Ollama: {e}"
-
-
-# =========================
-# Gemini function
-# =========================
-
-def ask_gemini(prompt: str) -> str:
-    try:
-        import google.generativeai as genai
-
-        if not GEMINI_API_KEY:
-            return "Error: GEMINI_API_KEY not found in environment variables."
-
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(GEMINI_MODEL)
+        model = _get_model()
         response = model.generate_content(prompt)
 
-        if hasattr(response, "text"):
-            return response.text
-        return "No response from Gemini."
+        if response and hasattr(response, "text") and response.text:
+            return response.text.strip(), []
 
+        return "No response was generated. Please try again.", []
+
+    except EnvironmentError as e:
+        return f"⚠️ Configuration Error: {e}", []
     except Exception as e:
-        return f"Error connecting to Gemini: {e}"
-
-
-# =========================
-# Main helper
-# =========================
-
-def ask_llm(prompt: str) -> str:
-    if LLM_PROVIDER.lower() == "ollama":
-        return ask_ollama(prompt)
-    elif LLM_PROVIDER.lower() == "gemini":
-        return ask_gemini(prompt)
-    else:
-        return "Error: Invalid LLM_PROVIDER. Use 'ollama' or 'gemini'."
+        error_msg = str(e)
+        if "API_KEY_INVALID" in error_msg or "invalid api key" in error_msg.lower():
+            return "⚠️ Invalid API Key. Please check your GEMINI_API_KEY in .env.", []
+        if "quota" in error_msg.lower() or "rate" in error_msg.lower():
+            return "⚠️ Rate limit reached. Please wait a moment and try again.", []
+        if "not found" in error_msg.lower() or "model" in error_msg.lower():
+            return f"⚠️ Model error: {error_msg}. Check your Gemini model name.", []
+        return f"❌ Gemini Error: {error_msg}", []

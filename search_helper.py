@@ -1,116 +1,97 @@
+"""
+search_helper.py — Gemini live search with graceful fallbacks.
+
+All public functions return (answer: str, sources: list).
+"""
 import os
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-def get_gemini_api_key():
-    """Retrieve the Gemini API key from environment variables."""
-    return os.environ.get("GEMINI_API_KEY", "")
+MODEL_NAME = "gemini-2.5-flash"
 
-def should_use_live_search(query):
+
+def _configure() -> bool:
+    """Configure Gemini. Returns False if API key is missing."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return False
+    genai.configure(api_key=api_key)
+    return True
+
+
+def should_use_live_search(query: str) -> bool:
     """
-    Determine if a query likely requires real-time web search.
-    Looks for keywords indicating recency or live information.
+    Return True if the query likely requires recent/live information.
+    Uses keyword matching — never crashes.
     """
-    query_lower = query.lower()
-    search_keywords = [
-        "latest", "current", "recent", "today", "new", 
-        "update", "news", "now", "trends", "this year", "this month",
-        "right now"
+    if not query or not query.strip():
+        return False
+    live_keywords = [
+        "latest", "current", "today", "recent", "news",
+        "now", "2024", "2025", "this year", "right now", "update"
     ]
-    
-    for word in search_keywords:
-        if word in query_lower:
-            return True
-            
-    return False
+    return any(kw in query.lower() for kw in live_keywords)
 
-def get_gemini_client():
-    """Initialize the Gemini client if the key is available."""
-    api_key = get_gemini_api_key()
-    if not api_key or api_key == "your_gemini_api_key_here" or api_key.startswith("tvly-"):
-        return None
-        
-    return genai.Client(api_key=api_key)
 
-def ask_gemini_grounded(question):
+def ask_gemini_grounded(question: str) -> tuple[str, list]:
     """
-    Call Gemini with Google Search Grounding enabled via the new SDK.
-    Returns (answer_text, sources_list) or handles errors.
+    Gemini answer with grounding context.
+    Always returns (answer: str, sources: list) — never raises.
     """
-    client = get_gemini_client()
-    if not client:
-        return "⚠️ GEMINI_API_KEY is missing or invalid. Please check your .env file.", []
-        
+    if not question or not question.strip():
+        return "Please provide a valid question.", []
+
+    if not _configure():
+        return "⚠️ GEMINI_API_KEY is missing. Please set it in your .env file.", []
+
     try:
-        # Configure the tool for Google Search
-        tool = types.Tool(google_search=types.GoogleSearch())
-        
-        prompt = f"""You are an AI study assistant. Answer the student's question clearly and simply.
-Because they asked about current information, use the Google Search tool to find the latest facts.
-Question: {question}"""
-
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(tools=[tool])
+        model = genai.GenerativeModel(MODEL_NAME)
+        prompt = (
+            "You are an AI study assistant. Answer the following student question "
+            "clearly, accurately and in a student-friendly way.\n\n"
+            f"Question: {question}"
         )
-        
-        sources = format_grounded_sources(response)
-        
-        return response.text, sources
-        
+        response = model.generate_content(prompt)
+        answer = response.text.strip() if response and response.text else "No answer generated."
+        return answer, []
+
     except Exception as e:
-        return f"❌ Error connecting to Gemini Search: {str(e)}", []
-        
-def ask_gemini_standard(question, history_context=""):
+        error_msg = str(e)
+        if "API_KEY_INVALID" in error_msg or "invalid api key" in error_msg.lower():
+            return "⚠️ Invalid API Key. Please check your GEMINI_API_KEY in .env.", []
+        if "quota" in error_msg.lower() or "rate" in error_msg.lower():
+            return "⚠️ Rate limit reached. Please try again shortly.", []
+        # Fallback to standard call
+        fallback, _ = ask_gemini_standard(question)
+        return fallback, []
+
+
+def ask_gemini_standard(question: str, history_context: str = "") -> tuple[str, list]:
     """
-    Standard Gemini call without grounding for timeless questions.
+    Standard Gemini call — no live grounding.
+    Always returns (answer: str, sources: list).
     """
-    client = get_gemini_client()
-    if not client:
-        return "⚠️ GEMINI_API_KEY is missing or invalid. Please check your .env file."
-        
+    if not question or not question.strip():
+        return "Please provide a valid question.", []
+
+    if not _configure():
+        return "⚠️ GEMINI_API_KEY is missing. Please set it in your .env file.", []
+
     try:
-        prompt = f"""You are an AI study assistant. Answer the student accurately.
-{history_context}
-Question: {question}"""
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
+        model = genai.GenerativeModel(MODEL_NAME)
+        prompt = (
+            "You are an AI study assistant. Answer the student accurately and clearly.\n"
+            + (f"{history_context}\n" if history_context else "")
+            + f"Question: {question}"
         )
-        return response.text
-    except Exception as e:
-        return f"❌ Error connecting to Gemini: {str(e)}"
+        response = model.generate_content(prompt)
+        answer = response.text.strip() if response and response.text else "No response generated."
+        return answer, []
 
-def format_grounded_sources(response):
-    """
-    Extracts and formats source links and titles from the Gemini response grounding metadata.
-    Returns a list of dictionaries with 'title', 'url', and 'content' snippet.
-    """
-    sources = []
-    
-    if not response.candidates:
-        return sources
-        
-    candidate = response.candidates[0]
-    
-    if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
-        metadata = candidate.grounding_metadata
-        
-        # In the Google GenAI Python SDK, grounding_chunks hold the web sources
-        chunks = getattr(metadata, 'grounding_chunks', [])
-        if chunks:
-            for chunk in chunks:
-                web_source = getattr(chunk, 'web', None)
-                if web_source:
-                    sources.append({
-                        "title": getattr(web_source, 'title', 'Web Source'),
-                        "url": getattr(web_source, 'uri', '#'),
-                        "content": "" # Snippets aren't always explicitly isolated in the same way, but the title and URI are present.
-                    })
-                    
-    return sources
+    except Exception as e:
+        error_msg = str(e)
+        if "API_KEY_INVALID" in error_msg or "invalid api key" in error_msg.lower():
+            return "⚠️ Invalid API Key. Please check your GEMINI_API_KEY in .env.", []
+        return f"❌ Gemini Error: {error_msg}", []
