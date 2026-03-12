@@ -1,7 +1,5 @@
 import streamlit as st
 import re
-from llm_helper import ask_llm
-from prompts import mistake_prompt
 from database import save_mistake_analysis
 
 def mistake_explainer(user):
@@ -20,7 +18,29 @@ def mistake_explainer(user):
     if submitted:
         if question and student_answer:
             with st.spinner("Analyzing your answer..."):
-                prompt = mistake_prompt(question, student_answer)
+                try:
+                    from llm_helper import ask_llm
+                except Exception as e:
+                    st.error(f"LLM helper import failed: {e}")
+                    st.stop()
+                    
+                prompt = f"""
+You are an exam coach.
+
+Analyze the student's mistake below.
+
+Question:
+{question}
+
+Student response:
+{student_answer}
+
+Return:
+1. What the mistake is
+2. Why it is incorrect
+3. The correct concept or answer
+4. A simple way to remember it
+"""
                 response = ask_llm(prompt)
 
             # Parse response
